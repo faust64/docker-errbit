@@ -241,11 +241,12 @@ objects:
           imagePullPolicy: IfNotPresent
           livenessProbe:
             failureThreshold: 20
+            httpGet:
+              path: /health/readiness
+              port: 8080
             initialDelaySeconds: 30
             periodSeconds: 20
             successThreshold: 1
-            tcpSocket:
-              port: 8080
             timeoutSeconds: 3
           name: errbit
           ports:
