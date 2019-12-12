@@ -1,0 +1,3 @@
+# Errbit
+
+OpenShift-friendly

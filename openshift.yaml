@@ -1,0 +1,392 @@
+apiVersion: v1
+kind: Template
+labels:
+  app: errbit
+  template: errbit-persistent-template
+metadata:
+  annotations:
+    description: Errbit Persistent
+    iconClass: icon-ruby
+    openshift.io/display-name: Errbit (Persistent)
+    tags: instant-app,errbit
+  name: errbit-persistent
+objects:
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: errbit
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    annotations:
+      template.openshift.io/expose-errbit_admin_username: "{.data['admin-user']}"
+      template.openshift.io/expose-errbit_admin_password: "{.data['admin-password']}"
+      template.openshift.io/expose-admin_password: "{.data['database-admin-password']}"
+      template.openshift.io/expose-database_name: "{.data['database-name']}"
+      template.openshift.io/expose-password: "{.data['database-password']}"
+      template.openshift.io/expose-username: "{.data['database-user']}"
+      template.openshift.io/expose-secretkey: "{.data['secret-key']}"
+    name: errbit
+  stringData:
+    admin-password: ${ERRBIT_ADMIN_PASSWORD}
+    admin-user: ${ERRBIT_ADMIN_USER}
+    database-admin-password: ${MONGODB_ADMIN_PASSWORD}
+    database-name: ${MONGODB_DATABASE}
+    database-password: ${MONGODB_PASSWORD}
+    database-user: ${MONGODB_USER}
+    secret-key: ${ERRBIT_SECRET_KEY}
+- apiVersion: v1
+  kind: BuildConfig
+  metadata:
+    annotations:
+      description: Builds Errbit images
+    name: errbit-${ERRBIT_REPOSITORY_REF}
+  spec:
+    failedBuildsHistoryLimit: 1
+    resources:
+      limits:
+        cpu: 400m
+        memory: 3Gi
+    source:
+      contextDir: /
+      git:
+        uri: ${ERRBIT_REPOSITORY_URL}
+        ref: "${ERRBIT_REPOSITORY_REF}"
+      type: Git
+    strategy:
+      type: Docker
+      dockerStrategy:
+        env:
+        - name: RACK_ENV
+          value: production
+        - name: RAILS_ENV
+          value: production
+    output:
+      to:
+        kind: ImageStreamTag
+        name: errbit:${ERRBIT_REPOSITORY_REF}
+    triggers:
+    - type: ImageChange
+    - type: ConfigChange
+    - generic:
+        secret: "${GENERIC_WEBHOOK_SECRET}"
+      type: Generic
+- apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    name: errbit-mongodb
+  spec:
+    accessModes: [ ReadWriteOnce ]
+    resources:
+      requests:
+        storage: ${MONGODB_VOLUME_CAPACITY}
+- apiVersion: v1
+  kind: DeploymentConfig
+  metadata:
+    labels:
+      name: errbit-mongodb
+    name: errbit-mongodb
+  spec:
+    replicas: 1
+    selector:
+      name: errbit-mongodb
+    strategy:
+      type: Recreate
+    template:
+      metadata:
+        labels:
+          name: errbit-mongodb
+      spec:
+        containers:
+        - env:
+          - name: MONGODB_ADMIN_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: database-admin-password
+                name: errbit
+          - name: MONGODB_DATABASE
+            valueFrom:
+              secretKeyRef:
+                key: database-name
+                name: errbit
+          - name: MONGODB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: database-password
+                name: errbit
+          - name: MONGODB_USER
+            valueFrom:
+              secretKeyRef:
+                key: database-user
+                name: errbit
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            failureThreshold: 10
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            successThreshold: 1
+            tcpSocket:
+              port: 27017
+            timeoutSeconds: 3
+          name: mongodb
+          ports:
+          - containerPort: 27017
+            protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - -i
+              - -c
+              - mongo 127.0.0.1:27017/$MONGODB_DATABASE -u $MONGODB_USER -p $MONGODB_PASSWORD --eval="quit()"
+            initialDelaySeconds: 10
+            timeoutSeconds: 2
+          resources:
+            limits:
+              cpu: ${MONGODB_CPU_LIMIT}
+              memory: ${MONGODB_MEMORY_LIMIT}
+          volumeMounts:
+          - mountPath: /var/lib/mongodb/data
+            name: data
+        volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: errbit-mongodb
+    triggers:
+    - imageChangeParams:
+        automatic: true
+        containerNames:
+        - mongodb
+        from:
+          kind: ImageStreamTag
+          name: ${MONGODB_IMAGESTREAM_TAG}
+          namespace: ${MONGODB_NAMESPACE}
+      type: ImageChange
+    - type: ConfigChange
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+      template.openshift.io/expose-uri: mongodb://{.spec.clusterIP}:{.spec.ports[?(.name=="mongo")].port}
+    name: errbit-mongodb
+  spec:
+    ports:
+    - name: mongo
+      port: 27017
+      protocol: TCP
+      targetPort: 27017
+    selector:
+      name: errbit-mongodb
+    type: ClusterIP
+- apiVersion: v1
+  kind: DeploymentConfig
+  metadata:
+    name: errbit
+  spec:
+    replicas: 1
+    selector:
+      name: errbit
+    strategy:
+      type: Rolling
+    template:
+      metadata:
+        labels:
+          name: errbit
+      spec:
+        containers:
+        - env:
+          - name: EMAIL_DELIVERY_METHOD
+            value: ":smtp"
+          - name: ERRBIT_ADMIN_EMAIL
+            value: ${ERRBIT_MAIL_FROM}
+          - name: ERRBIT_ADMIN_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: admin-password
+                name: errbit
+          - name: ERRBIT_ADMIN_USER
+            valueFrom:
+              secretKeyRef:
+                key: admin-user
+                name: errbit
+          - name: MONGODB_URL
+            value: "mongodb://${MONGODB_USER}:${MONGODB_PASSWORD}@errbit-mongodb:27017/${MONGODB_DATABASE}"
+          - name: PORT
+            value: "8080"
+          - name: RACK_ENV
+            value: production
+          - name: RAILS_ENV
+            value: production
+          - name: ERRBIT_EMAIL_FROM
+            value: ${ERRBIT_MAIL_FROM}
+          - name: ERRBIT_USE_GRAVATAR
+            value: 'true'
+          - name: SECRET_KEY_BASE
+            valueFrom:
+              secretKeyRef:
+                key: secret-key
+                name: errbit
+          - name: SMTP_ENABLE_STARTTLS_AUTO
+            value: "true"
+          - name: SMTP_HELO
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+          - name: SMTP_OPENSSL_VERIFY_MODE
+            value: none
+          - name: SMTP_SERVER
+            value: ${SMTP_RELAY}
+          - name: TZ
+            value: Europe/Paris
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            failureThreshold: 20
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            successThreshold: 1
+            tcpSocket:
+              port: 8080
+            timeoutSeconds: 3
+          name: errbit
+          ports:
+          - containerPort: 8080
+            protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            limits:
+              cpu: ${ERRBIT_CPU_LIMIT}
+              memory: ${ERRBIT_MEMORY_LIMIT}
+    triggers:
+    - imageChangeParams:
+        automatic: true
+        containerNames:
+        - errbit
+        from:
+          kind: ImageStreamTag
+          name: errbit:${ERRBIT_REPOSITORY_REF}
+      type: ImageChange
+    - type: ConfigChange
+- apiVersion: v1
+  kind: Service
+  metadata:
+    name: errbit
+  spec:
+    ports:
+    - name: errbit
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+    selector:
+      name: errbit
+    type: ClusterIP
+- apiVersion: v1
+  kind: Route
+  metadata:
+    name: errbit
+  spec:
+    to:
+      kind: Service
+      name: errbit
+    tls:
+      insecureEdgeTerminationPolicy: Redirect
+      termination: edge
+parameters:
+- name: ERRBIT_ADMIN_PASSWORD
+  description: Password for the Errbit connection user.
+  displayName: Errbit Connection Password
+  from: '[a-zA-Z0-9]{16}'
+  generate: expression
+  required: true
+- name: ERRBIT_ADMIN_USER
+  description: Username for Errbit user that will be used for accessing the database.
+  displayName: Errbit Connection Username
+  from: admin[A-Z0-9]{3}
+  generate: expression
+  required: true
+- name: ERRBIT_CPU_LIMIT
+  description: Maximum amount of CPU a Errbit container can use
+  displayName: Errbit CPU Limit
+  required: true
+  value: 300m
+- name: ERRBIT_MAIL_FROM
+  value: errbit@demo.local
+- name: ERRBIT_MEMORY_LIMIT
+  description: Maximum amount of memory a Errbit container can use
+  displayName: Errbit Memory Limit
+  required: true
+  value: 512Mi
+- name: ERRBIT_REPOSITORY_REF
+  description: Set this to a branch name, tag or other ref of your repository if you are not using the default branch
+  displayName: Git Reference
+  required: true
+  value: master
+- name: ERRBIT_REPOSITORY_URL
+  description: The URL of the repository with your Errbit Dockerfile
+  displayName: Git Repository URL
+  required: true
+  value: https://github.com/errbit/errbit.git
+- name: ERRBIT_SECRET_KEY
+  description: "Secret key for Errbit - generate with 'rake secret'."
+  displayName: Errbit Secret Key
+  value: f258ed69266dc8ad0ca79363c3d2f945c388a9c5920fc9a1ae99a98fbb619f135001c6434849b625884a9405a60cd3d50fc3e3b07ecd38cbed7406a4fccdb59c
+- name: GENERIC_WEBHOOK_SECRET
+  description: A secret string used to configure the Generic webhook building images
+  displayName: Generic Webhook Secret
+  from: '[a-zA-Z0-9]{40}'
+  generate: expression
+- name: MONGODB_ADMIN_PASSWORD
+  description: Password for the database admin user.
+  displayName: MongoDB Admin Password
+  from: '[a-zA-Z0-9]{16}'
+  generate: expression
+  required: true
+- name: MONGODB_CPU_LIMIT
+  description: Maximum amount of CPU a MongoDB container can use
+  displayName: MongoDB CPU Limit
+  required: true
+  value: 300m
+- name: MONGODB_DATABASE
+  description: Name of the MongoDB database accessed.
+  displayName: MongoDB Database Name
+  required: true
+  value: errbit
+- name: MONGODB_IMAGESTREAM_TAG
+  description: MongoDB Image Tag
+  displayName: MongoDB ImageStream Tag
+  required: true
+  value: mongodb:3.6
+- name: MONGODB_MEMORY_LIMIT
+  description: Maximum amount of memory a MongoDB container can use
+  displayName: MongoDB Memory Limit
+  required: true
+  value: 512Mi
+- name: MONGODB_NAMESPACE
+  description: MongoDB Image Namespace
+  displayName: MongoDB Namespace
+  required: true
+  value: openshift
+- name: MONGODB_PASSWORD
+  description: Password for the MongoDB connection user.
+  displayName: MongoDB Connection Password
+  from: '[a-zA-Z0-9]{16}'
+  generate: expression
+  required: true
+- name: MONGODB_USER
+  description: Username for MongoDB user that will be used for accessing the database.
+  displayName: MongoDB Connection Username
+  from: user[A-Z0-9]{3}
+  generate: expression
+  required: true
+- name: MONGODB_VOLUME_CAPACITY
+  description: Volume space available for MongoDB data, e.g. 512Mi, 2Gi.
+  displayName: MongoDB Volume Capacity
+  required: true
+  value: 8Gi
+- name: SMTP_RELAY
+  value: smtp.demo.local
